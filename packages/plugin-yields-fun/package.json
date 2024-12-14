@@ -1,0 +1,45 @@
+{
+    "name": "@ai16z/plugin-yields-fun",
+    "version": "0.1.0",
+    "main": "dist/index.js",
+    "type": "module",
+    "types": "dist/index.d.ts",
+    "engines": {
+        "node": ">=18"
+    },
+    "dependencies": {
+        "@ai16z/eliza": "workspace:^",
+        "@coral-xyz/anchor": "^0.28.0",
+        "@solana/web3.js": "^1.95.8",
+        "@solana/spl-token": "^0.4.9",
+        "@jup-ag/core": "^4.0.0-beta.21",
+        "@orca-so/whirlpools-sdk": "^0.11.5",
+        "@meteora-ag/meteora": "^0.3.1",
+        "@raydium-io/raydium-sdk": "^1.3.1-beta.6",
+        "@solanaturbine/poseidon": "^0.1.0",
+        "@solanaturbine/turbine": "^0.1.0",
+        "@solanaturbine/turbine-cli": "^0.1.0",
+        "bignumber.js": "^9.1.2",
+        "node-cache": "^5.1.2",
+        "axios": "^1.6.2",
+        "bs58": "^5.0.0",
+        "decimal.js": "^10.4.3"
+    },
+    "devDependencies": {
+        "@types/bn.js": "^5.1.5",
+        "@types/node": "^20.10.4",
+        "tsup": "^8.0.1",
+        "typescript": "^5.3.3",
+        "vitest": "^1.0.4"
+    },
+    "peerDependencies": {
+        "form-data": "^4.0.0",
+        "whatwg-url": "^7.1.0"
+    },
+    "scripts": {
+        "build": "tsup --format esm --dts",
+        "dev": "tsup --format esm --dts --watch",
+        "lint": "eslint . --fix",
+        "test": "vitest run"
+    }
+}
