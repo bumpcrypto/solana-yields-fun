@@ -139,6 +139,25 @@ interface Transaction {
     timestamp: string;
 }
 
+interface WatchlistRow {
+    token_address: string;
+    added_at: string;
+    last_checked: string;
+    price_change_threshold: number;
+    volume_change_threshold: number;
+    liquidity_change_threshold: number;
+    is_active: number;
+}
+
+interface WatchlistAlertRow {
+    token_address: string;
+    timestamp: string;
+    alert_type: string;
+    message: string;
+    severity: string;
+    metrics_json: string;
+}
+
 export class TrustScoreDatabase {
     private db: Database;
 
@@ -1421,5 +1440,110 @@ export class TrustScoreDatabase {
      */
     closeConnection(): void {
         this.db.close();
+    }
+
+    async createWatchlistTables(): Promise<void> {
+        await this.db.exec(`
+          CREATE TABLE IF NOT EXISTS watchlist (
+            token_address TEXT PRIMARY KEY,
+            added_at TEXT NOT NULL,
+            last_checked TEXT NOT NULL,
+            price_change_threshold REAL NOT NULL,
+            volume_change_threshold REAL NOT NULL,
+            liquidity_change_threshold REAL NOT NULL,
+            is_active INTEGER DEFAULT 1
+          );
+
+          CREATE TABLE IF NOT EXISTS watchlist_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_address TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            metrics_json TEXT NOT NULL,
+            FOREIGN KEY (token_address) REFERENCES watchlist(token_address)
+          );
+        `);
+    }
+
+    async addToWatchlist(entry: WatchlistRow): Promise<void> {
+        await this.db.run(
+            `
+          INSERT OR REPLACE INTO watchlist (
+            token_address,
+            added_at,
+            last_checked,
+            price_change_threshold,
+            volume_change_threshold,
+            liquidity_change_threshold,
+            is_active
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `,
+            [
+                entry.token_address,
+                entry.added_at,
+                entry.last_checked,
+                entry.price_change_threshold,
+                entry.volume_change_threshold,
+                entry.liquidity_change_threshold,
+                entry.is_active,
+            ]
+        );
+    }
+
+    async removeFromWatchlist(tokenAddress: string): Promise<void> {
+        await this.db.run("DELETE FROM watchlist WHERE token_address = ?", [
+            tokenAddress,
+        ]);
+    }
+
+    async getWatchlist(): Promise<WatchlistRow[]> {
+        return await this.db.all("SELECT * FROM watchlist WHERE is_active = 1");
+    }
+
+    async addWatchlistAlert(alert: WatchlistAlertRow): Promise<void> {
+        await this.db.run(
+            `
+          INSERT INTO watchlist_alerts (
+            token_address,
+            timestamp,
+            alert_type,
+            message,
+            severity,
+            metrics_json
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `,
+            [
+                alert.token_address,
+                alert.timestamp,
+                alert.alert_type,
+                alert.message,
+                alert.severity,
+                alert.metrics_json,
+            ]
+        );
+    }
+
+    async getWatchlistAlerts(
+        tokenAddress?: string
+    ): Promise<WatchlistAlertRow[]> {
+        const query = tokenAddress
+            ? "SELECT * FROM watchlist_alerts WHERE token_address = ? ORDER BY timestamp DESC"
+            : "SELECT * FROM watchlist_alerts ORDER BY timestamp DESC";
+
+        const params = tokenAddress ? [tokenAddress] : [];
+        return await this.db.all(query, params);
+    }
+
+    async updateWatchlistLastChecked(tokenAddress: string): Promise<void> {
+        await this.db.run(
+            `
+          UPDATE watchlist
+          SET last_checked = ?
+          WHERE token_address = ?
+        `,
+            [new Date().toISOString(), tokenAddress]
+        );
     }
 }

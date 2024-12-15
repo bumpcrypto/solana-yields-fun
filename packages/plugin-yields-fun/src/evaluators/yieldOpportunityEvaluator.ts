@@ -51,12 +51,69 @@ export interface RangeStrategy {
     confidenceScore: number;
 }
 
+export interface AmmRouting {
+    protocol: "raydium" | "meteora";
+    poolAddress: string;
+    strategy:
+        | "concentrated"
+        | "full-range"
+        | "dlmm-spot"
+        | "dlmm-curve"
+        | "dlmm-bid-ask";
+    recommendedRange?: {
+        lowerTick: number;
+        upperTick: number;
+        confidenceScore: number;
+    };
+    dlmmStrategy?: {
+        minBinId: number;
+        maxBinId: number;
+        strategyType: "SpotBalanced" | "Curve" | "BidAsk";
+    };
+}
+
 export interface YieldRecommendation {
     intent: YieldIntent;
-    strategy: "concentrated" | "full-range" | "observe";
-    rangeStrategy?: RangeStrategy;
+    strategy: "concentrated" | "full-range" | "observe" | "delta-neutral";
+    ammRouting: AmmRouting;
     maxExposure: number;
     riskLevel: "low" | "medium" | "high" | "extreme";
+    reasoning: string[];
+}
+
+export interface PerpTradingMetrics {
+    // Market Health
+    markPrice: number;
+    indexPrice: number;
+    fundingRate: number;
+    openInterest: number;
+    volume24h: number;
+    volatility24h: number;
+
+    // Risk Metrics
+    leverageUtilization: number;
+    liquidityDepth: number;
+    bidAskSpread: number;
+    maxLeverage: number;
+
+    // Position Metrics
+    unrealizedPnl: number;
+    realizedPnl: number;
+    entryPrice: number;
+    liquidationPrice: number;
+    marginRatio: number;
+}
+
+export interface PerpTradingRecommendation {
+    action: "OPEN" | "CLOSE" | "MODIFY" | "HOLD";
+    side?: "LONG" | "SHORT";
+    marketCode: string;
+    size: string;
+    leverage: number;
+    entryPrice?: string;
+    stopLoss?: string;
+    takeProfit?: string;
+    confidence: number;
     reasoning: string[];
 }
 
@@ -509,6 +566,274 @@ export class YieldOpportunityEvaluator implements Evaluator {
     ): number {
         // Calculate remaining delta exposure after hedging
         return rawDelta * (1 - hedgeEfficiency);
+    }
+
+    private async determineOptimalAmm(
+        baseAddress: string,
+        quoteAddress: string,
+        intent: YieldIntent
+    ): Promise<AmmRouting> {
+        // Get pool data from both AMMs
+        const [raydiumPool, meteoraPool] = await Promise.all([
+            this.raydium.getPool(baseAddress, quoteAddress),
+            this.getMeteoraDlmmPool(baseAddress, quoteAddress),
+        ]);
+
+        // Compare metrics
+        const raydiumMetrics = await this.getRaydiumPoolMetrics(raydiumPool);
+        const meteoraMetrics = await this.getMeteoraDlmmMetrics(meteoraPool);
+
+        // Determine optimal AMM based on:
+        // 1. Liquidity depth
+        // 2. Volume
+        // 3. Fee generation
+        // 4. Price impact
+        // 5. Strategy requirements (e.g., concentrated liquidity vs DLMM bins)
+
+        if (
+            meteoraMetrics.volumeToTVLRatio >
+            raydiumMetrics.volumeToTVLRatio * 1.2
+        ) {
+            // If Meteora has significantly better volume/TVL ratio
+            return {
+                protocol: "meteora",
+                poolAddress: meteoraPool.address.toBase58(),
+                strategy: "dlmm-spot",
+                dlmmStrategy: {
+                    minBinId: meteoraMetrics.optimalMinBin,
+                    maxBinId: meteoraMetrics.optimalMaxBin,
+                    strategyType: "SpotBalanced",
+                },
+            };
+        } else {
+            // Default to Raydium if metrics are similar or better
+            return {
+                protocol: "raydium",
+                poolAddress: raydiumPool.id.toBase58(),
+                strategy: "concentrated",
+                recommendedRange: {
+                    lowerTick: raydiumMetrics.optimalLowerTick,
+                    upperTick: raydiumMetrics.optimalUpperTick,
+                    confidenceScore: raydiumMetrics.rangeConfidence,
+                },
+            };
+        }
+    }
+
+    private async getMeteoraDlmmPool(
+        baseAddress: string,
+        quoteAddress: string
+    ) {
+        // Implementation to fetch Meteora DLMM pool
+        // This would use the DLMM SDK to get pool information
+        return null; // Placeholder
+    }
+
+    private async getMeteoraDlmmMetrics(pool: any) {
+        // Implementation to calculate Meteora DLMM metrics
+        return {
+            volumeToTVLRatio: 0,
+            optimalMinBin: 0,
+            optimalMaxBin: 0,
+        }; // Placeholder
+    }
+
+    private async getRaydiumPoolMetrics(pool: any) {
+        // Implementation to calculate Raydium pool metrics
+        return {
+            volumeToTVLRatio: 0,
+            optimalLowerTick: 0,
+            optimalUpperTick: 0,
+            rangeConfidence: 0,
+        }; // Placeholder
+    }
+
+    async evaluatePerpTrade(
+        marketCode: string,
+        side: "LONG" | "SHORT",
+        size: string,
+        leverage: number
+    ): Promise<PerpTradingRecommendation> {
+        // Get market data
+        const [ticker, fundingRates, leverageTiers] = await Promise.all([
+            this.oxProvider.getTicker(marketCode),
+            this.oxProvider.getFundingRates(marketCode),
+            this.oxProvider.getLeverageTiers(marketCode),
+        ]);
+
+        // Calculate metrics
+        const metrics = this.calculatePerpMetrics(
+            ticker,
+            fundingRates,
+            leverageTiers
+        );
+
+        // Evaluate trade
+        const recommendation = this.generatePerpRecommendation(
+            marketCode,
+            side,
+            size,
+            leverage,
+            metrics
+        );
+
+        return recommendation;
+    }
+
+    private calculatePerpMetrics(
+        ticker: any,
+        fundingRates: any,
+        leverageTiers: any
+    ): PerpTradingMetrics {
+        return {
+            markPrice: parseFloat(ticker.data[0].markPrice),
+            indexPrice: parseFloat(
+                ticker.data[0].indexPrice || ticker.data[0].markPrice
+            ),
+            fundingRate: parseFloat(fundingRates.data[0]?.fundingRate || "0"),
+            openInterest: parseFloat(ticker.data[0].openInterest),
+            volume24h: parseFloat(ticker.data[0].volume24h),
+            volatility24h: this.calculateVolatility(ticker.data[0]),
+            leverageUtilization: this.calculateLeverageUtilization(
+                ticker.data[0]
+            ),
+            liquidityDepth: this.calculateLiquidityDepth(ticker.data[0]),
+            bidAskSpread: this.calculateBidAskSpread(ticker.data[0]),
+            maxLeverage: this.getMaxLeverageFromTiers(leverageTiers),
+            unrealizedPnl: 0,
+            realizedPnl: 0,
+            entryPrice: 0,
+            liquidationPrice: 0,
+            marginRatio: 0,
+        };
+    }
+
+    private generatePerpRecommendation(
+        marketCode: string,
+        side: "LONG" | "SHORT",
+        size: string,
+        leverage: number,
+        metrics: PerpTradingMetrics
+    ): PerpTradingRecommendation {
+        const confidence = this.calculateTradeConfidence(metrics, side);
+        const reasoning: string[] = [];
+
+        // Analyze funding rate
+        if (Math.abs(metrics.fundingRate) > 0.001) {
+            reasoning.push(
+                `High funding rate (${metrics.fundingRate}) indicates strong ${metrics.fundingRate > 0 ? "long" : "short"} bias`
+            );
+        }
+
+        // Check leverage against market conditions
+        if (leverage > metrics.maxLeverage) {
+            reasoning.push(
+                `Requested leverage (${leverage}x) exceeds maximum allowed (${metrics.maxLeverage}x)`
+            );
+        }
+
+        // Analyze volatility
+        if (metrics.volatility24h > 0.1) {
+            reasoning.push(
+                `High volatility (${metrics.volatility24h}) suggests using lower leverage`
+            );
+        }
+
+        // Make recommendation
+        const recommendation: PerpTradingRecommendation = {
+            action: confidence > 70 ? "OPEN" : "HOLD",
+            side,
+            marketCode,
+            size,
+            leverage: Math.min(leverage, metrics.maxLeverage),
+            entryPrice: metrics.markPrice.toString(),
+            stopLoss: this.calculateStopLoss(
+                metrics.markPrice,
+                side,
+                leverage
+            ).toString(),
+            takeProfit: this.calculateTakeProfit(
+                metrics.markPrice,
+                side,
+                leverage
+            ).toString(),
+            confidence,
+            reasoning,
+        };
+
+        return recommendation;
+    }
+
+    private calculateTradeConfidence(
+        metrics: PerpTradingMetrics,
+        side: "LONG" | "SHORT"
+    ): number {
+        let confidence = 50; // Base confidence
+
+        // Adjust based on funding rate
+        if (side === "LONG" && metrics.fundingRate < 0) confidence += 10;
+        if (side === "SHORT" && metrics.fundingRate > 0) confidence += 10;
+
+        // Adjust based on volatility
+        if (metrics.volatility24h < 0.05) confidence += 10;
+        if (metrics.volatility24h > 0.15) confidence -= 20;
+
+        // Adjust based on liquidity
+        if (metrics.liquidityDepth > 1000000) confidence += 10;
+        if (metrics.bidAskSpread < 0.0001) confidence += 10;
+
+        return Math.min(100, Math.max(0, confidence));
+    }
+
+    private calculateStopLoss(
+        entryPrice: number,
+        side: "LONG" | "SHORT",
+        leverage: number
+    ): number {
+        const stopDistance = (entryPrice * 0.1) / leverage; // 10% account risk
+        return side === "LONG"
+            ? entryPrice - stopDistance
+            : entryPrice + stopDistance;
+    }
+
+    private calculateTakeProfit(
+        entryPrice: number,
+        side: "LONG" | "SHORT",
+        leverage: number
+    ): number {
+        const profitDistance = (entryPrice * 0.2) / leverage; // 2:1 reward:risk ratio
+        return side === "LONG"
+            ? entryPrice + profitDistance
+            : entryPrice - profitDistance;
+    }
+
+    // Helper methods for metrics calculation
+    private calculateVolatility(ticker: any): number {
+        const high = parseFloat(ticker.high24h);
+        const low = parseFloat(ticker.low24h);
+        const avg = (high + low) / 2;
+        return (high - low) / avg;
+    }
+
+    private calculateLeverageUtilization(ticker: any): number {
+        return parseFloat(ticker.openInterest) / parseFloat(ticker.volume24h);
+    }
+
+    private calculateLiquidityDepth(ticker: any): number {
+        return parseFloat(ticker.volume24h);
+    }
+
+    private calculateBidAskSpread(ticker: any): number {
+        return 0.0002; // Default spread, should be calculated from orderbook
+    }
+
+    private getMaxLeverageFromTiers(leverageTiers: any): number {
+        if (!leverageTiers?.data?.[0]?.tiers) return 3;
+        return Math.max(
+            ...leverageTiers.data[0].tiers.map((t: any) =>
+                parseFloat(t.leverage)
+            )
+        );
     }
 }
 
