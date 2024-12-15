@@ -1,14 +1,12 @@
-import { Connection, PublicKey } from "@solana/web3.js";
+import { Connection, PublicKey, Keypair } from "@solana/web3.js";
 import { ICacheManager } from "@ai16z/eliza";
-import { Liquidity, LiquidityPoolKeys, Market } from "@raydium-io/raydium-sdk";
+import { ApiV3PoolInfoStandardItem } from "@raydium-io/raydium-sdk-v2";
 import NodeCache from "node-cache";
-import { YieldOpportunity, PoolData } from "../types/yield";
-import BigNumber from "bignumber.js";
+import { YieldOpportunity } from "../types/yield";
+import axios from "axios";
+import { initSdk } from "../config";
 
 const PROVIDER_CONFIG = {
-    BIRDEYE_API: "https://public-api.birdeye.so",
-    MAX_RETRIES: 3,
-    RETRY_DELAY: 2000,
     DEFAULT_RPC: "https://api.mainnet-beta.solana.com",
     CACHE_TTL: 300, // 5 minutes
 };
@@ -16,6 +14,7 @@ const PROVIDER_CONFIG = {
 export class RaydiumProvider {
     private cache: NodeCache;
     private connection: Connection;
+    private raydiumSDK: any;
 
     constructor(
         connection: Connection,
@@ -25,147 +24,109 @@ export class RaydiumProvider {
         this.connection = connection;
     }
 
-    async getLPOpportunities(): Promise<YieldOpportunity[]> {
-        const cacheKey = "raydium_lp_opportunities";
-        const cached = this.cache.get<YieldOpportunity[]>(cacheKey);
+    private async ensureSDKInitialized() {
+        if (!this.raydiumSDK) {
+            const dummyKeypair = Keypair.generate();
+            this.raydiumSDK = await initSdk({
+                owner: dummyKeypair,
+                connection: this.connection,
+                cluster: "mainnet",
+                loadToken: false,
+            });
+        }
+        return this.raydiumSDK;
+    }
+
+    async getPoolState(poolId: string) {
+        const cacheKey = `pool_state_${poolId}`;
+        const cached = this.cache.get(cacheKey);
         if (cached) return cached;
 
         try {
-            // Fetch all Raydium pools
-            const pools = await this.fetchRaydiumPools();
-            const opportunities: YieldOpportunity[] = [];
-
-            for (const pool of pools) {
-                const apy = await this.calculatePoolAPY(pool);
-
-                opportunities.push({
-                    protocol: "Raydium",
-                    type: "LP",
-                    apy,
-                    tvl: pool.tvlUSD,
-                    risk: this.calculatePoolRisk(pool),
-                    tokens: [pool.token0, pool.token1],
-                    address: pool.address,
-                    description: `Raydium LP pool for ${pool.token0}/${pool.token1}`,
-                });
-            }
-
-            this.cache.set(cacheKey, opportunities);
-            return opportunities;
+            const sdk = await this.ensureSDKInitialized();
+            const poolState = await sdk.api.getPoolState(poolId);
+            this.cache.set(cacheKey, poolState);
+            return poolState;
         } catch (error) {
-            console.error("Error fetching Raydium LP opportunities:", error);
-            return [];
+            console.error("Error fetching pool state:", error);
+            throw error;
         }
     }
 
-    private async fetchRaydiumPools(): Promise<PoolData[]> {
+    async getPoolPositions(poolId: string) {
+        const cacheKey = `pool_positions_${poolId}`;
+        const cached = this.cache.get(cacheKey);
+        if (cached) return cached;
+
         try {
-            // Get all liquidity pools from Raydium SDK
-            const allPools = await Liquidity.fetchAllPoolKeys(this.connection);
-
-            const poolsData: PoolData[] = await Promise.all(
-                allPools.map(async (poolKeys: LiquidityPoolKeys) => {
-                    const poolInfo = await Liquidity.fetchInfo({
-                        connection: this.connection,
-                        poolKeys,
-                    });
-
-                    const marketInfo = await Market.fetchInfo({
-                        connection: this.connection,
-                        marketId: poolKeys.marketId,
-                    });
-
-                    // Calculate pool metrics
-                    const tvlUSD = this.calculateTVL(poolInfo, marketInfo);
-                    const volume24h = await this.fetch24hVolume(poolKeys.id);
-
-                    return {
-                        address: poolKeys.id.toString(),
-                        token0: poolKeys.baseMint.toString(),
-                        token1: poolKeys.quoteMint.toString(),
-                        fee: poolInfo.fee,
-                        liquidity: poolInfo.lpSupply,
-                        sqrtPrice: marketInfo.sqrtPrice,
-                        tick: marketInfo.tickCurrent,
-                        token0Price: marketInfo.price,
-                        token1Price: 1 / marketInfo.price,
-                        token0Volume24h: volume24h.token0,
-                        token1Volume24h: volume24h.token1,
-                        volumeUSD24h: volume24h.usd,
-                        feesUSD24h: volume24h.usd * (poolInfo.fee / 1_000_000),
-                        tvlUSD,
-                    };
-                })
-            );
-
-            return poolsData;
+            const sdk = await this.ensureSDKInitialized();
+            const positions = await sdk.api.getPositions(poolId);
+            this.cache.set(cacheKey, positions);
+            return positions;
         } catch (error) {
-            console.error("Error fetching Raydium pools:", error);
-            return [];
+            console.error("Error fetching pool positions:", error);
+            throw error;
         }
     }
 
-    private async calculatePoolAPY(pool: PoolData): Promise<number> {
-        // Calculate APY based on 24h fees and TVL
-        const dailyFeeRate = pool.feesUSD24h / pool.tvlUSD;
-        const yearlyFeeRate = dailyFeeRate * 365;
-        return yearlyFeeRate * 100; // Convert to percentage
-    }
-
-    private calculatePoolRisk(pool: PoolData): number {
-        // Risk factors:
-        // 1. Low liquidity (< $100k) - high risk
-        // 2. High volatility (price impact)
-        // 3. Low volume (< $10k/24h)
-        let risk = 5; // Base risk score out of 10
-
-        if (pool.tvlUSD < 100000) risk += 2;
-        if (pool.volumeUSD24h < 10000) risk += 2;
-
-        // Calculate price impact for 1000 USD trade
-        const priceImpact = 1000 / pool.tvlUSD;
-        if (priceImpact > 0.01) risk += 1; // >1% price impact
-
-        return Math.min(risk, 10); // Cap at 10
-    }
-
-    private async fetch24hVolume(poolId: PublicKey): Promise<{
-        token0: number;
-        token1: number;
-        usd: number;
-    }> {
-        // Use Birdeye API to fetch volume data
+    async getTickArrays(poolId: string) {
         try {
-            const response = await fetch(
-                `${PROVIDER_CONFIG.BIRDEYE_API}/dex/pools/${poolId}/volume?range=24h`,
-                {
-                    headers: {
-                        "Content-Type": "application/json",
-                    },
-                }
-            );
+            const sdk = await this.ensureSDKInitialized();
+            return await sdk.api.getTickArrays(poolId);
+        } catch (error) {
+            console.error("Error fetching tick arrays:", error);
+            throw error;
+        }
+    }
 
-            const data = await response.json();
+    async getCurrentTick(poolId: string) {
+        try {
+            const poolState = await this.getPoolState(poolId);
+            return poolState.currentTick;
+        } catch (error) {
+            console.error("Error getting current tick:", error);
+            throw error;
+        }
+    }
+
+    async getTickSpacing(poolId: string) {
+        try {
+            const poolState = await this.getPoolState(poolId);
+            return poolState.tickSpacing;
+        } catch (error) {
+            console.error("Error getting tick spacing:", error);
+            throw error;
+        }
+    }
+
+    async calculateOptimalRange(poolId: string, rangeWidth: number = 10) {
+        try {
+            const currentTick = await this.getCurrentTick(poolId);
+            const tickSpacing = await this.getTickSpacing(poolId);
+
+            const lowerTick = currentTick - rangeWidth * tickSpacing;
+            const upperTick = currentTick + rangeWidth * tickSpacing;
+
             return {
-                token0: data.data.token0Volume || 0,
-                token1: data.data.token1Volume || 0,
-                usd: data.data.volumeUSD || 0,
+                lowerTick,
+                upperTick,
+                currentTick,
+                tickSpacing,
             };
         } catch (error) {
-            console.error("Error fetching 24h volume:", error);
-            return { token0: 0, token1: 0, usd: 0 };
+            console.error("Error calculating optimal range:", error);
+            throw error;
         }
     }
 
-    private calculateTVL(poolInfo: any, marketInfo: any): number {
-        const token0Amount = new BigNumber(poolInfo.baseReserve.toString());
-        const token1Amount = new BigNumber(poolInfo.quoteReserve.toString());
-
-        // Use market price to calculate TVL in USD
-        const token0Value = token0Amount.multipliedBy(marketInfo.price);
-        const token1Value = token1Amount;
-
-        return token0Value.plus(token1Value).toNumber();
+    async getPoolLiquidity(poolId: string) {
+        try {
+            const poolState = await this.getPoolState(poolId);
+            return poolState.liquidity;
+        } catch (error) {
+            console.error("Error getting pool liquidity:", error);
+            throw error;
+        }
     }
 }
 
@@ -181,25 +142,11 @@ export const raydiumProvider = {
                 connection,
                 runtime.cacheManager
             );
-            const opportunities = await provider.getLPOpportunities();
 
-            // Format opportunities into a readable report
-            let report = "🌊 Raydium LP Opportunities\n\n";
-
-            opportunities
-                .sort((a, b) => b.apy - a.apy)
-                .slice(0, 5) // Top 5 opportunities
-                .forEach((opp) => {
-                    report += `${opp.tokens[0]}/${opp.tokens[1]}\n`;
-                    report += `APY: ${opp.apy.toFixed(2)}%\n`;
-                    report += `TVL: $${opp.tvl.toLocaleString()}\n`;
-                    report += `Risk: ${opp.risk}/10\n\n`;
-                });
-
-            return report;
+            return "Raydium CLM provider initialized successfully.";
         } catch (error) {
             console.error("Error in Raydium provider:", error);
-            return "Unable to fetch Raydium opportunities. Please try again later.";
+            return "Unable to initialize Raydium provider. Please try again later.";
         }
     },
 };

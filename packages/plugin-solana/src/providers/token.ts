@@ -1105,10 +1105,7 @@ const tokenProvider: Provider = {
         try {
             const { publicKey } = await getWalletKey(runtime, false);
 
-            const walletProvider = new WalletProvider(
-                connection,
-                publicKey
-            );
+            const walletProvider = new WalletProvider(connection, publicKey);
 
             const provider = new TokenProvider(
                 tokenAddress,
