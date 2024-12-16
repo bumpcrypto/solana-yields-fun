@@ -20,9 +20,10 @@ import {
     PAIR_OVERVIEW,
     WALLET_TOKEN_LIST,
     WALLET_TX_LIST,
+    HistoricalPriceDataPoint,
 } from "./birdeyeEndpoints";
 
-export class BirdeyeProvider implements Provider {
+export class BirdeyeProvider {
     private readonly API_KEY: string;
     private readonly BASE_URL = BIRDEYE_API_BASE_URL;
     private cache: NodeCache;

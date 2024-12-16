@@ -1,121 +1,30 @@
 import {
+    composeContext,
     IAgentRuntime,
     Memory,
-    State,
-    Evaluator,
-    composeContext,
     ModelClass,
+    Evaluator,
+    State,
+    generateTrueOrFalse,
+    MemoryManager,
     generateObjectArray,
-    booleanFooter,
+    Content,
 } from "@ai16z/eliza";
-import { Connection, PublicKey } from "@solana/web3.js";
+import { TrustScoreDatabase } from "@ai16z/plugin-trustdb";
+import { Connection } from "@solana/web3.js";
 import { BirdeyeProvider } from "../providers/birdeyeProvider";
 import { RaydiumProvider } from "../providers/raydiumProvider";
-
-export type YieldIntent = "farm" | "provide_liquidity" | "monitor";
-
-export interface YieldOpportunityMetrics {
-    // Market Health
-    price: number;
-    priceChange24h: number;
-    volume24h: number;
-    tvl: number;
-    volumeToTVLRatio: number;
-
-    // Yield Metrics
-    estimatedAPR: number;
-    feeAPR: number;
-    rewardAPR: number;
-    impermanentLossRisk: number;
-
-    // Risk Metrics
-    securityScore: number;
-    priceVolatility: number;
-    liquidityConcentration: number;
-    holderDistribution: number;
-
-    // Delta Neutral Metrics
-    hedgingCost: number;
-    borrowingCost: number;
-    hedgeEfficiency: number;
-    netDeltaExposure: number;
-    fundingRate: number;
-    borrowUtilization: number;
-}
-
-export interface RangeStrategy {
-    lowerTick: number;
-    upperTick: number;
-    expectedAPR: number;
-    rebalanceFrequency: "hourly" | "daily" | "weekly";
-    confidenceScore: number;
-}
-
-export interface AmmRouting {
-    protocol: "raydium" | "meteora";
-    poolAddress: string;
-    strategy:
-        | "concentrated"
-        | "full-range"
-        | "dlmm-spot"
-        | "dlmm-curve"
-        | "dlmm-bid-ask";
-    recommendedRange?: {
-        lowerTick: number;
-        upperTick: number;
-        confidenceScore: number;
-    };
-    dlmmStrategy?: {
-        minBinId: number;
-        maxBinId: number;
-        strategyType: "SpotBalanced" | "Curve" | "BidAsk";
-    };
-}
-
-export interface YieldRecommendation {
-    intent: YieldIntent;
-    strategy: "concentrated" | "full-range" | "observe" | "delta-neutral";
-    ammRouting: AmmRouting;
-    maxExposure: number;
-    riskLevel: "low" | "medium" | "high" | "extreme";
-    reasoning: string[];
-}
-
-export interface PerpTradingMetrics {
-    // Market Health
-    markPrice: number;
-    indexPrice: number;
-    fundingRate: number;
-    openInterest: number;
-    volume24h: number;
-    volatility24h: number;
-
-    // Risk Metrics
-    leverageUtilization: number;
-    liquidityDepth: number;
-    bidAskSpread: number;
-    maxLeverage: number;
-
-    // Position Metrics
-    unrealizedPnl: number;
-    realizedPnl: number;
-    entryPrice: number;
-    liquidationPrice: number;
-    marginRatio: number;
-}
-
-export interface PerpTradingRecommendation {
-    action: "OPEN" | "CLOSE" | "MODIFY" | "HOLD";
-    side?: "LONG" | "SHORT";
-    marketCode: string;
-    size: string;
-    leverage: number;
-    entryPrice?: string;
-    stopLoss?: string;
-    takeProfit?: string;
-    confidence: number;
-    reasoning: string[];
-}
+import {
+    YieldOpportunityMetrics,
+    YieldRecommendation,
+    YieldIntent,
+} from "../types/yield";
+import { booleanFooter } from "../utils/templates";
+import { getWalletKey } from "../keypairUtils";
+import { TokenProvider } from "../providers/token";
+import { TokenPairTrustManager } from "../providers/tokenPairTrustManager";
+import { DexScreenerProvider } from "../providers/dexScreenerProvider";
+import { OxProvider } from "../providers/oxProvider";
 
 const shouldProcessTemplate = `# Task: Decide if the recent messages should be processed for yield opportunity evaluation.
 
@@ -171,7 +80,14 @@ Based on the following conversation, should the messages be processed for yield 
 
 Should the messages be processed for yield evaluation? ${booleanFooter}`;
 
-const yieldRecommendationTemplate = `# Task: Evaluate yield opportunities based on the conversation and market data.
+export const formatRecommendations = (recommendations: Memory[]) => {
+    const messageStrings = recommendations
+        .reverse()
+        .map((rec: Memory) => `${(rec.content as Content)?.content}`);
+    const finalMessageStrings = messageStrings.join("\n");
+    return finalMessageStrings;
+};
+const recommendationTemplate = `# Task: Evaluate yield and trading opportunities based on the conversation and market data.
 
 # Context
 Recent market data and metrics are provided below:
@@ -182,696 +98,577 @@ Previous recommendations:
 
 User's stated intent: {{intent}}
 
-# Yield Categories to Consider
+# Opportunity Categories to Consider
 
-1. Staking Opportunities:
-- Liquid staking protocols and their current rates
-- Native staking positions and validator performance
-- Governance staking and voting rewards
-- Protocol-specific staking mechanisms
+1. Concentrated Liquidity Opportunities:
+- High volatility pairs for maximum fee generation
+- Wide price ranges for volatile assets
+- Active range management for optimal positioning
+- Multiple positions across different ranges
+- Leverage volatility for higher returns
 
-2. Liquidity Providing:
-- Concentrated vs traditional liquidity analysis
-- Range optimization for volatile pairs
-- Stable pool opportunities
-- Single-sided vs dual-sided exposure
-- Fee tier selection and volume analysis
+2. Liquidity Providing Strategies:
+- Focus on high volume/volatile pairs
+- Aggressive range setting for max fee capture
+- Dynamic rebalancing for volatile markets
+- Capitalize on price swings
+- Stack yields with farming rewards
 
-3. Yield Farming:
-- Current farming incentives and their sustainability
-- Reward token analysis and vesting schedules
-- Auto-compounding opportunities
-- Leveraged farming risks and rewards
+3. Yield Farming Opportunities:
+- High APY farming with active management
+- Leveraged farming positions
+- Stack multiple reward tokens
+- Capitalize on new pool incentives
+- Early pool entry for max rewards
 
-4. Lending Markets:
-- Supply and borrow rate spreads
-- Collateral factor optimization
-- Interest rate trends
-- Protocol health and utilization
-
-5. Protocol Rewards:
-- Revenue sharing mechanisms
-- Governance participation benefits
-- Trading fee rebates
-- Long-term incentive alignment
-
-6. Delta Neutral Strategies:
-- Long-short paired positions
-- Hedged liquidity providing
-- Market making with delta hedging
-- Cross-protocol arbitrage opportunities
+4. Delta Neutral Strategies:
+- Use volatility for both sides of trade
 - Funding rate arbitrage
-- Basis trading strategies
-- Perpetual-spot arbitrage
+- Perpetual-spot basis trading
 - Options-based neutral strategies
+- Cross-protocol arbitrage
 
-# Evaluation Criteria
-1. Market Health:
-- Price stability and trends
-- Volume consistency
-- TVL growth and retention
-- Market depth and resilience
-
-2. Yield Components:
-- Base yield (trading fees, interest)
-- Incentive yield (rewards, emissions)
-- Governance yield (voting, revenue share)
-- Compound yield opportunities
-- Hedging costs and efficiency
-- Net funding rate income
-
-3. Risk Assessment:
-- Smart contract security
-- Market manipulation risks
-- Impermanent loss exposure
-- Protocol governance risks
-- Centralization risks
-- Market volatility impact
-- Correlation risk
-- Basis risk
-- Liquidation risk
-- Oracle reliability
-
-4. Operational Considerations:
-- Gas efficiency
-- Rebalancing frequency
-- Automation possibilities
-- Position management complexity
-- Hedging infrastructure requirements
-- Cross-protocol dependencies
-- Liquidation management
-- Monitoring requirements
+5. Market Making Opportunities:
+- Wide spreads in volatile markets
+- Active order management
+- Cross-venue arbitrage
+- Stack LP fees with MM profits
+- Capitalize on inefficient markets
 
 # Response Format
-Response should be a JSON object with the following structure:
+Response should be a JSON object array inside a JSON markdown block. Correct response format:
 \`\`\`json
-{
-    "intent": "farm" | "provide_liquidity" | "monitor",
-    "strategy": "concentrated" | "full-range" | "observe" | "delta-neutral",
-    "rangeStrategy": {
-        "lowerTick": number,
-        "upperTick": number,
-        "expectedAPR": number,
-        "rebalanceFrequency": "hourly" | "daily" | "weekly",
-        "confidenceScore": number
-    },
-    "deltaStrategy": {
-        "longComponent": string,
-        "shortComponent": string,
+[
+    {
+        "intent": "farm" | "provide_liquidity" | "monitor" | "perp_trade" | "spot_trade",
+        "strategy": "concentrated" | "full-range" | "observe" | "delta-neutral" | "long" | "short" | "basis",
+        "recommender": string,
+        "ticker": string | null,
+        "contractAddress": string | null,
+        "type": "buy" | "dont_buy" | "sell" | "dont_sell",
+        "conviction": "none" | "low" | "medium" | "high",
+        "alreadyKnown": boolean,
+        "ammRouting": string[],
+        "maxExposure": number,
+        "riskLevel": "low" | "medium" | "high" | "extreme",
+        "reasoning": string[],
+        "leverage": number,
+        "fundingRate": number,
+        "basisSpread": number,
         "hedgeRatio": number,
-        "expectedNetAPR": number,
-        "hedgingFrequency": "hourly" | "daily" | "weekly",
-        "confidenceScore": number
     },
-    "maxExposure": number,
-    "riskLevel": "low" | "medium" | "high" | "extreme",
-    "reasoning": string[]
-}
+    ...
+]
 \`\`\``;
 
-export class YieldOpportunityEvaluator implements Evaluator {
-    name = "YIELD_OPPORTUNITY_EVALUATOR";
-    similes = ["YIELD_EVAL", "OPPORTUNITY_EVAL"];
-    description =
-        "Evaluates DeFi yield opportunities based on market data and user intent";
-
-    private birdeye: BirdeyeProvider;
-    private raydium: RaydiumProvider;
-
-    constructor(private connection: Connection) {
-        this.birdeye = new BirdeyeProvider();
-        this.raydium = new RaydiumProvider(connection, null);
-    }
+export const yieldOpportunityEvaluator: Evaluator = {
+    name: "YIELD_OPPORTUNITY_EVALUATOR",
+    similes: ["YIELD_EVAL", "OPPORTUNITY_EVAL"],
+    description:
+        "Evaluates DeFi yield opportunities based on market data and user intent",
+    alwaysRun: false,
 
     async validate(runtime: IAgentRuntime, message: Memory): Promise<boolean> {
-        const state = await runtime.composeState(message);
-        const context = composeContext({
-            state,
-            template: shouldProcessTemplate,
-        });
-
-        return await runtime.generateTrueOrFalse({
-            context,
-            modelClass: ModelClass.SMALL,
-        });
-    }
-
-    async handler(
-        runtime: IAgentRuntime,
-        message: Memory,
-        state?: State
-    ): Promise<any> {
-        console.log("Evaluating yield opportunity");
-
-        // Extract token address and intent from message
-        const { tokenAddress, intent } = await this.extractTokenInfo(
-            runtime,
-            message
-        );
-        if (!tokenAddress) {
-            console.log("No token address found in message");
-            return null;
-        }
-
-        // Gather market data
-        const marketData = await this.gatherMarketData(tokenAddress);
-
-        // Compose evaluation context
-        const context = composeContext({
-            state: {
-                ...state,
-                marketMetrics: JSON.stringify(marketData),
-                intent,
-                previousRecommendations: await this.getPreviousRecommendations(
-                    runtime,
-                    message.roomId
-                ),
-            },
-            template: yieldRecommendationTemplate,
-        });
-
-        // Generate evaluation using LLM
-        const evaluation = await generateObjectArray({
-            runtime,
-            context,
-            modelClass: ModelClass.LARGE,
-        });
-
-        // Store evaluation in memory
-        await this.storeEvaluation(runtime, message, evaluation);
-
-        return evaluation;
-    }
-
-    private async extractTokenInfo(
-        runtime: IAgentRuntime,
-        message: Memory
-    ): Promise<{ tokenAddress: string; intent: YieldIntent }> {
-        // Implementation to extract token address and intent from message
-        // This would use runtime's LLM capabilities to parse the message
-        return { tokenAddress: "", intent: "monitor" }; // Placeholder
-    }
-
-    private async gatherMarketData(tokenAddress: string) {
-        const [priceData, securityData, holderData, historicalPrices] =
-            await Promise.all([
-                this.birdeye.getPriceVolume(tokenAddress),
-                this.birdeye.getTokenSecurity(tokenAddress),
-                this.birdeye.getTokenHolder(tokenAddress),
-                this.birdeye.getHistoricalPrices(tokenAddress),
-            ]);
-
-        return this.calculateMetrics(
-            priceData,
-            securityData,
-            holderData,
-            historicalPrices
-        );
-    }
-
-    private async getPreviousRecommendations(
-        runtime: IAgentRuntime,
-        roomId: string
-    ): Promise<string> {
-        const memoryManager = runtime.memoryManager;
-        const recommendations = await memoryManager.getMemories({
-            roomId,
-            count: 5,
-            type: "yield_recommendation",
-        });
-
-        return recommendations.map((r) => JSON.stringify(r.content)).join("\n");
-    }
-
-    private async storeEvaluation(
-        runtime: IAgentRuntime,
-        message: Memory,
-        evaluation: any
-    ) {
-        await runtime.memoryManager.createMemory({
-            userId: message.userId,
-            agentId: runtime.agentId,
-            content: evaluation,
-            roomId: message.roomId,
-            type: "yield_recommendation",
-            createdAt: Date.now(),
-        });
-    }
-
-    private calculateMetrics(
-        priceData: any,
-        securityData: any,
-        holderData: any,
-        historicalPrices: any
-    ): YieldOpportunityMetrics {
-        const volatility = this.calculateVolatility(historicalPrices);
-        const volumeToTVL = priceData.volume24h / priceData.tvl;
-
-        return {
-            price: priceData.price,
-            priceChange24h: priceData.priceChange24h,
-            volume24h: priceData.volume24h,
-            tvl: priceData.tvl,
-            volumeToTVLRatio: volumeToTVL,
-            estimatedAPR: this.calculateEstimatedAPR(priceData, volumeToTVL),
-            feeAPR: this.calculateFeeAPR(priceData),
-            rewardAPR: this.calculateRewardAPR(priceData),
-            impermanentLossRisk: this.calculateILRisk(volatility),
-            securityScore: securityData.score,
-            priceVolatility: volatility,
-            liquidityConcentration:
-                this.calculateLiquidityConcentration(priceData),
-            holderDistribution: this.calculateHolderDistribution(holderData),
-            hedgingCost: 0,
-            borrowingCost: 0,
-            hedgeEfficiency: 0,
-            netDeltaExposure: 0,
-            fundingRate: 0,
-            borrowUtilization: 0,
-        };
-    }
-
-    private calculateVolatility(prices: number[]): number {
-        if (prices.length < 2) return 0;
-        const returns = prices
-            .slice(1)
-            .map((price, i) => Math.log(price / prices[i]));
-        const mean = returns.reduce((a, b) => a + b) / returns.length;
-        const variance =
-            returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) /
-            returns.length;
-        return Math.sqrt(variance);
-    }
-
-    private calculateEstimatedAPR(priceData: any, volumeToTVL: number): number {
-        return volumeToTVL * 365 * 0.003 * 100; // Assuming 0.3% fee tier
-    }
-
-    private calculateFeeAPR(priceData: any): number {
-        return ((priceData.volume24h * 0.003 * 365) / priceData.tvl) * 100;
-    }
-
-    private calculateRewardAPR(priceData: any): number {
-        return priceData.rewardAPR || 0;
-    }
-
-    private calculateILRisk(volatility: number): number {
-        return Math.min(100, volatility * 200);
-    }
-
-    private calculateLiquidityConcentration(priceData: any): number {
-        return priceData.liquidityConcentration || 50;
-    }
-
-    private calculateHolderDistribution(holderData: any): number {
-        return holderData.distribution || 50;
-    }
-
-    private calculateMaxExposure(
-        metrics: YieldOpportunityMetrics,
-        riskLevel: string
-    ): number {
-        const baseExposure = {
-            low: 20,
-            medium: 10,
-            high: 5,
-            extreme: 0,
-        }[riskLevel];
-
-        return Math.max(
-            0,
-            Math.min(20, baseExposure * (metrics.securityScore / 100))
-        );
-    }
-
-    private determineRebalanceFrequency(
-        metrics: YieldOpportunityMetrics
-    ): "hourly" | "daily" | "weekly" {
-        if (metrics.priceVolatility > 0.4) return "hourly";
-        if (metrics.priceVolatility > 0.2) return "daily";
-        return "weekly";
-    }
-
-    private calculateConfidenceScore(metrics: YieldOpportunityMetrics): number {
-        return Math.min(
-            100,
-            metrics.securityScore * 0.3 +
-                (100 - metrics.impermanentLossRisk) * 0.3 +
-                metrics.holderDistribution * 0.2 +
-                metrics.volumeToTVLRatio * 100 * 0.2
-        );
-    }
-
-    private calculateDeltaNeutralMetrics(
-        priceData: any,
-        fundingData: any,
-        borrowData: any
-    ): Partial<YieldOpportunityMetrics> {
-        const hedgingCost = this.estimateHedgingCost(priceData.volatility);
-        const borrowingCost = borrowData?.borrowRate || 0;
-        const hedgeEfficiency = this.calculateHedgeEfficiency(
-            priceData.correlation
-        );
-        const netDeltaExposure = this.calculateNetDelta(
-            priceData.delta,
-            hedgeEfficiency
-        );
-        const fundingRate = fundingData?.fundingRate || 0;
-        const borrowUtilization = borrowData?.utilization || 0;
-
-        return {
-            hedgingCost,
-            borrowingCost,
-            hedgeEfficiency,
-            netDeltaExposure,
-            fundingRate,
-            borrowUtilization,
-        };
-    }
-
-    private estimateHedgingCost(volatility: number): number {
-        // Estimate hedging cost based on volatility and typical spread
-        const baseSpread = 0.001; // 10 bps
-        return baseSpread * (1 + volatility);
-    }
-
-    private calculateHedgeEfficiency(correlation: number): number {
-        // Calculate how effective the hedge is based on correlation
-        return Math.min(1, Math.max(0, Math.abs(correlation)));
-    }
-
-    private calculateNetDelta(
-        rawDelta: number,
-        hedgeEfficiency: number
-    ): number {
-        // Calculate remaining delta exposure after hedging
-        return rawDelta * (1 - hedgeEfficiency);
-    }
-
-    private async determineOptimalAmm(
-        baseAddress: string,
-        quoteAddress: string,
-        intent: YieldIntent
-    ): Promise<AmmRouting> {
-        // Get pool data from both AMMs
-        const [raydiumPool, meteoraPool] = await Promise.all([
-            this.raydium.getPool(baseAddress, quoteAddress),
-            this.getMeteoraDlmmPool(baseAddress, quoteAddress),
-        ]);
-
-        // Compare metrics
-        const raydiumMetrics = await this.getRaydiumPoolMetrics(raydiumPool);
-        const meteoraMetrics = await this.getMeteoraDlmmMetrics(meteoraPool);
-
-        // Determine optimal AMM based on:
-        // 1. Liquidity depth
-        // 2. Volume
-        // 3. Fee generation
-        // 4. Price impact
-        // 5. Strategy requirements (e.g., concentrated liquidity vs DLMM bins)
-
+        // Ignore short messages and bot's own messages
         if (
-            meteoraMetrics.volumeToTVLRatio >
-            raydiumMetrics.volumeToTVLRatio * 1.2
+            message.content.text.length < 5 ||
+            message.userId === message.agentId
         ) {
-            // If Meteora has significantly better volume/TVL ratio
-            return {
-                protocol: "meteora",
-                poolAddress: meteoraPool.address.toBase58(),
-                strategy: "dlmm-spot",
-                dlmmStrategy: {
-                    minBinId: meteoraMetrics.optimalMinBin,
-                    maxBinId: meteoraMetrics.optimalMaxBin,
-                    strategyType: "SpotBalanced",
-                },
-            };
-        } else {
-            // Default to Raydium if metrics are similar or better
-            return {
-                protocol: "raydium",
-                poolAddress: raydiumPool.id.toBase58(),
-                strategy: "concentrated",
-                recommendedRange: {
-                    lowerTick: raydiumMetrics.optimalLowerTick,
-                    upperTick: raydiumMetrics.optimalUpperTick,
-                    confidenceScore: raydiumMetrics.rangeConfidence,
-                },
-            };
-        }
-    }
-
-    private async getMeteoraDlmmPool(
-        baseAddress: string,
-        quoteAddress: string
-    ) {
-        // Implementation to fetch Meteora DLMM pool
-        // This would use the DLMM SDK to get pool information
-        return null; // Placeholder
-    }
-
-    private async getMeteoraDlmmMetrics(pool: any) {
-        // Implementation to calculate Meteora DLMM metrics
-        return {
-            volumeToTVLRatio: 0,
-            optimalMinBin: 0,
-            optimalMaxBin: 0,
-        }; // Placeholder
-    }
-
-    private async getRaydiumPoolMetrics(pool: any) {
-        // Implementation to calculate Raydium pool metrics
-        return {
-            volumeToTVLRatio: 0,
-            optimalLowerTick: 0,
-            optimalUpperTick: 0,
-            rangeConfidence: 0,
-        }; // Placeholder
-    }
-
-    async evaluatePerpTrade(
-        marketCode: string,
-        side: "LONG" | "SHORT",
-        size: string,
-        leverage: number
-    ): Promise<PerpTradingRecommendation> {
-        // Get market data
-        const [ticker, fundingRates, leverageTiers] = await Promise.all([
-            this.oxProvider.getTicker(marketCode),
-            this.oxProvider.getFundingRates(marketCode),
-            this.oxProvider.getLeverageTiers(marketCode),
-        ]);
-
-        // Calculate metrics
-        const metrics = this.calculatePerpMetrics(
-            ticker,
-            fundingRates,
-            leverageTiers
-        );
-
-        // Evaluate trade
-        const recommendation = this.generatePerpRecommendation(
-            marketCode,
-            side,
-            size,
-            leverage,
-            metrics
-        );
-
-        return recommendation;
-    }
-
-    private calculatePerpMetrics(
-        ticker: any,
-        fundingRates: any,
-        leverageTiers: any
-    ): PerpTradingMetrics {
-        return {
-            markPrice: parseFloat(ticker.data[0].markPrice),
-            indexPrice: parseFloat(
-                ticker.data[0].indexPrice || ticker.data[0].markPrice
-            ),
-            fundingRate: parseFloat(fundingRates.data[0]?.fundingRate || "0"),
-            openInterest: parseFloat(ticker.data[0].openInterest),
-            volume24h: parseFloat(ticker.data[0].volume24h),
-            volatility24h: this.calculateVolatility(ticker.data[0]),
-            leverageUtilization: this.calculateLeverageUtilization(
-                ticker.data[0]
-            ),
-            liquidityDepth: this.calculateLiquidityDepth(ticker.data[0]),
-            bidAskSpread: this.calculateBidAskSpread(ticker.data[0]),
-            maxLeverage: this.getMaxLeverageFromTiers(leverageTiers),
-            unrealizedPnl: 0,
-            realizedPnl: 0,
-            entryPrice: 0,
-            liquidationPrice: 0,
-            marginRatio: 0,
-        };
-    }
-
-    private generatePerpRecommendation(
-        marketCode: string,
-        side: "LONG" | "SHORT",
-        size: string,
-        leverage: number,
-        metrics: PerpTradingMetrics
-    ): PerpTradingRecommendation {
-        const confidence = this.calculateTradeConfidence(metrics, side);
-        const reasoning: string[] = [];
-
-        // Analyze funding rate
-        if (Math.abs(metrics.fundingRate) > 0.001) {
-            reasoning.push(
-                `High funding rate (${metrics.fundingRate}) indicates strong ${metrics.fundingRate > 0 ? "long" : "short"} bias`
-            );
+            return false;
         }
 
-        // Check leverage against market conditions
-        if (leverage > metrics.maxLeverage) {
-            reasoning.push(
-                `Requested leverage (${leverage}x) exceeds maximum allowed (${metrics.maxLeverage}x)`
-            );
-        }
+        // Check for yield-related keywords
+        const yieldKeywords = [
+            "yield",
+            "apy",
+            "apr",
+            "farm",
+            "stake",
+            "liquidity",
+            "pool",
+            "vault",
+            "lp",
+            "staking",
+            "rewards",
+        ];
 
-        // Analyze volatility
-        if (metrics.volatility24h > 0.1) {
-            reasoning.push(
-                `High volatility (${metrics.volatility24h}) suggests using lower leverage`
-            );
-        }
+        const text = message.content.text.toLowerCase();
+        return yieldKeywords.some((keyword) => text.includes(keyword));
+    },
 
-        // Make recommendation
-        const recommendation: PerpTradingRecommendation = {
-            action: confidence > 70 ? "OPEN" : "HOLD",
-            side,
-            marketCode,
-            size,
-            leverage: Math.min(leverage, metrics.maxLeverage),
-            entryPrice: metrics.markPrice.toString(),
-            stopLoss: this.calculateStopLoss(
-                metrics.markPrice,
-                side,
-                leverage
-            ).toString(),
-            takeProfit: this.calculateTakeProfit(
-                metrics.markPrice,
-                side,
-                leverage
-            ).toString(),
-            confidence,
-            reasoning,
-        };
-
-        return recommendation;
-    }
-
-    private calculateTradeConfidence(
-        metrics: PerpTradingMetrics,
-        side: "LONG" | "SHORT"
-    ): number {
-        let confidence = 50; // Base confidence
-
-        // Adjust based on funding rate
-        if (side === "LONG" && metrics.fundingRate < 0) confidence += 10;
-        if (side === "SHORT" && metrics.fundingRate > 0) confidence += 10;
-
-        // Adjust based on volatility
-        if (metrics.volatility24h < 0.05) confidence += 10;
-        if (metrics.volatility24h > 0.15) confidence -= 20;
-
-        // Adjust based on liquidity
-        if (metrics.liquidityDepth > 1000000) confidence += 10;
-        if (metrics.bidAskSpread < 0.0001) confidence += 10;
-
-        return Math.min(100, Math.max(0, confidence));
-    }
-
-    private calculateStopLoss(
-        entryPrice: number,
-        side: "LONG" | "SHORT",
-        leverage: number
-    ): number {
-        const stopDistance = (entryPrice * 0.1) / leverage; // 10% account risk
-        return side === "LONG"
-            ? entryPrice - stopDistance
-            : entryPrice + stopDistance;
-    }
-
-    private calculateTakeProfit(
-        entryPrice: number,
-        side: "LONG" | "SHORT",
-        leverage: number
-    ): number {
-        const profitDistance = (entryPrice * 0.2) / leverage; // 2:1 reward:risk ratio
-        return side === "LONG"
-            ? entryPrice + profitDistance
-            : entryPrice - profitDistance;
-    }
-
-    // Helper methods for metrics calculation
-    private calculateVolatility(ticker: any): number {
-        const high = parseFloat(ticker.high24h);
-        const low = parseFloat(ticker.low24h);
-        const avg = (high + low) / 2;
-        return (high - low) / avg;
-    }
-
-    private calculateLeverageUtilization(ticker: any): number {
-        return parseFloat(ticker.openInterest) / parseFloat(ticker.volume24h);
-    }
-
-    private calculateLiquidityDepth(ticker: any): number {
-        return parseFloat(ticker.volume24h);
-    }
-
-    private calculateBidAskSpread(ticker: any): number {
-        return 0.0002; // Default spread, should be calculated from orderbook
-    }
-
-    private getMaxLeverageFromTiers(leverageTiers: any): number {
-        if (!leverageTiers?.data?.[0]?.tiers) return 3;
-        return Math.max(
-            ...leverageTiers.data[0].tiers.map((t: any) =>
-                parseFloat(t.leverage)
-            )
-        );
-    }
-}
-
-// Export the evaluator instance for the Eliza framework
-export const yieldOpportunityEvaluator = {
-    evaluate: async (
-        runtime: IAgentRuntime,
-        message: Memory,
-        state?: State
-    ): Promise<string> => {
+    async handler(runtime: IAgentRuntime, message: Memory): Promise<any> {
         try {
-            const connection = new Connection(
-                runtime.getSetting("RPC_URL") ||
-                    "https://api.mainnet-beta.solana.com"
-            );
+            const state = await runtime.composeState(message);
 
-            const evaluator = new YieldOpportunityEvaluator(connection);
-            const tokenAddress = message.get("tokenAddress");
-            const intent = (message.get("intent") as YieldIntent) || "monitor";
+            const { agentId, roomId } = state;
 
-            if (!tokenAddress) {
-                return "Please provide a token address for evaluation.";
+            // Check if we should process the messages
+            const shouldProcessContext = composeContext({
+                state,
+                template: shouldProcessTemplate,
+            });
+
+            const shouldProcess = await generateTrueOrFalse({
+                context: shouldProcessContext,
+                modelClass: ModelClass.SMALL,
+                runtime,
+            });
+
+            if (!shouldProcess) {
+                console.log("Skipping process");
+                return [];
             }
 
-            const evaluation = await evaluator.evaluateOpportunity(
-                tokenAddress,
-                intent,
-                state
-            );
+            const recommendationsManager = new MemoryManager({
+                runtime,
+                tableName: "recommendations",
+            });
 
-            if (state) {
-                state.set("lastYieldEvaluation", evaluation);
+            const recentRecommendations =
+                await recommendationsManager.getMemories({
+                    roomId,
+                    count: 20,
+                });
+
+            const context = composeContext({
+                state: {
+                    ...state,
+                    recentRecommendations: formatRecommendations(
+                        recentRecommendations
+                    ),
+                },
+                template: recommendationTemplate,
+            });
+
+            const recommendations = await generateObjectArray({
+                runtime,
+                context,
+                modelClass: ModelClass.LARGE,
+            });
+
+            console.log("recommendations", recommendations);
+
+            if (!recommendations) {
+                return [];
             }
 
-            return JSON.stringify(evaluation, null, 2);
+            const filteredRecommendations = recommendations.filter((rec) => {
+                return (
+                    !rec.alreadyKnown &&
+                    rec.intent &&
+                    rec.strategy &&
+                    rec.recommender &&
+                    rec.type &&
+                    rec.conviction &&
+                    rec.ammRouting &&
+                    rec.maxExposure &&
+                    rec.riskLevel &&
+                    rec.reasoning &&
+                    rec.leverage &&
+                    rec.fundingRate &&
+                    rec.basisSpread &&
+                    rec.hedgeRatio &&
+                    rec.ticker &&
+                    rec.contractAddress &&
+                    rec.recommender.trim() !== ""
+                );
+            });
+
+            const { publicKey } = await getWalletKey(runtime, false);
+
+            // TODO: Everything else - market data gathering, metrics calculation, etc.
+            // This is where we'll add:
+            // 1. Market data gathering from Birdeye/Raydium
+            // 2. Metrics calculation
+            // 3. Recommendation generation
+            // 4. Storing evaluation
+
+            // 7. Process each filtered recommendation
+            for (const rec of filteredRecommendations) {
+                // Create connection and wallet provider
+                const walletProvider = new WalletProvider(
+                    new Connection(
+                        runtime.getSetting("RPC_URL") ||
+                            "https://api.mainnet-beta.solana.com"
+                    ),
+                    publicKey
+                );
+
+                // Handle different intents
+                switch (rec.intent) {
+                    case "provide_liquidity": {
+                        // 1. First use DexScreener to find the best pool/pair for our tokens
+                        const dexScreener = new DexScreenerProvider();
+
+                        // 2. Get the quote token (usually SOL/USDC) from the recommendation
+                        const quoteToken =
+                            "So11111111111111111111111111111111111111112"; // Always use SOL as quote
+
+                        // 3. Find the best DEX and pool for this pair
+                        const bestDex = await dexScreener.getBestDexForPair(
+                            rec.contractAddress,
+                            quoteToken
+                        );
+
+                        if (bestDex.dexId === "none") {
+                            console.warn("No liquid pools found for this pair");
+                            continue;
+                        }
+
+                        // 4. Get all pairs data to analyze market depth
+                        const allPairs =
+                            await dexScreener.getPairsByTokenAddress(
+                                rec.contractAddress
+                            );
+                        const solPairs = allPairs.filter(
+                            (pair) => pair.quoteToken.symbol === "SOL"
+                        );
+
+                        // 5. Now evaluate trust for the token pair
+                        const tokenPairTrustManager = new TokenPairTrustManager(
+                            runtime
+                        );
+                        const trustState =
+                            await tokenPairTrustManager.getTrustState(
+                                rec.contractAddress,
+                                quoteToken
+                            );
+
+                        // 6. If the pair isn't trustworthy, skip it
+                        if (!trustState.recommendations.shouldProvide) {
+                            console.warn(
+                                `Pair not recommended for LP: ${trustState.recommendations.warning.join(", ")}`
+                            );
+                            continue;
+                        }
+
+                        // 7. Store trust score in database for future reference
+                        const trustScoreDb = new TrustScoreDatabase(
+                            runtime.databaseAdapter.db
+                        );
+
+                        await trustScoreDb.createOrUpdateScore({
+                            address: bestDex.pairAddress,
+                            protocol: bestDex.dexId,
+                            tokenAddress: rec.contractAddress,
+                            poolMetrics: {
+                                volume24h: bestDex.volumeUsd24h,
+                                liquidity: bestDex.liquidityUsd,
+                                pairAddress: bestDex.pairAddress,
+                            },
+                            trustMetrics: trustState.metrics,
+                            lastUpdated: Date.now(),
+                        });
+
+                        // 8. Create memory entry with all the analyzed data
+                        const recMemory = {
+                            userId: message.userId,
+                            agentId,
+                            content: {
+                                text: JSON.stringify({
+                                    type: "lp_recommendation",
+                                    data: {
+                                        ...rec,
+                                        bestDex: {
+                                            dexId: bestDex.dexId,
+                                            pairAddress: bestDex.pairAddress,
+                                            volumeUsd24h: bestDex.volumeUsd24h,
+                                            liquidityUsd: bestDex.liquidityUsd,
+                                        },
+                                        allPairs: solPairs,
+                                        trustState,
+                                        maxExposure: Math.min(
+                                            trustState.recommendations
+                                                .maxExposure,
+                                            bestDex.liquidityUsd * 0.01 // Cap at 1% of pool liquidity
+                                        ),
+                                        riskLevel:
+                                            trustState.recommendations
+                                                .riskLevel,
+                                        warnings:
+                                            trustState.recommendations.warning,
+                                    },
+                                }),
+                                type: "lp_recommendation",
+                                source: "yield_evaluator",
+                            },
+                            roomId,
+                            createdAt: Date.now(),
+                        };
+
+                        await recommendationsManager.createMemory(
+                            recMemory,
+                            true
+                        );
+                        break;
+                    }
+
+                    case "perp_trade": {
+                        // 1. First use Birdeye to analyze the token and market
+                        const birdeyeProvider = new BirdeyeProvider();
+
+                        // 2. Get market data and evaluation from Birdeye
+                        const [tokenMarketData, pairEvaluation] =
+                            await Promise.all([
+                                birdeyeProvider.getMarketData(
+                                    rec.contractAddress
+                                ),
+                                birdeyeProvider.evaluatePair(
+                                    rec.contractAddress,
+                                    rec.quoteToken ||
+                                        "So11111111111111111111111111111111111111112" // Default to SOL
+                                ),
+                            ]);
+
+                        // 3. If market conditions aren't favorable, skip it
+                        if (pairEvaluation.recommendation === "avoid") {
+                            console.warn(
+                                `Market conditions unfavorable for perp trading: ${pairEvaluation.riskLevel} risk`
+                            );
+                            continue;
+                        }
+
+                        // 4. Get OX provider for perp-specific data
+                        const oxProvider = new OxProvider({
+                            apiKey: runtime.getSetting("OX_API_KEY"),
+                            apiSecret: runtime.getSetting("OX_API_SECRET"),
+                        });
+
+                        // 5. Get perp market data from OX
+                        const marketInfo = await oxProvider.getMarketInfo(
+                            rec.marketCode
+                        );
+                        const fundingRates = await oxProvider.getFundingRates(
+                            rec.marketCode
+                        );
+
+                        // 6. Validate position parameters
+                        const isValidPosition =
+                            await oxProvider.validatePosition(
+                                rec.marketCode,
+                                rec.size.toString(),
+                                rec.leverage
+                            );
+
+                        if (!isValidPosition) {
+                            console.warn(
+                                "Position parameters invalid or exceed limits"
+                            );
+                            continue;
+                        }
+
+                        // 7. Store trust score and market evaluation
+                        const trustScoreDb = new TrustScoreDatabase(
+                            runtime.databaseAdapter.db
+                        );
+                        await trustScoreDb.createOrUpdateScore({
+                            address: rec.contractAddress,
+                            protocol: "ox",
+                            tokenAddress: rec.contractAddress,
+                            marketMetrics: {
+                                volume24h: tokenMarketData.volume24h,
+                                liquidity: tokenMarketData.liquidity,
+                                volatility:
+                                    pairEvaluation.volatilityMetrics
+                                        .pairVolatility,
+                                fundingRate: fundingRates.current,
+                            },
+                            trustMetrics: {
+                                riskLevel: pairEvaluation.riskLevel,
+                                marketHealth: pairEvaluation.marketHealth,
+                                confidenceScore: pairEvaluation.confidenceScore,
+                            },
+                            lastUpdated: Date.now(),
+                        });
+
+                        // Analyze volatility context for the perp trade
+                        const volatilityContext = {
+                            isHighVol:
+                                pairEvaluation.volatilityMetrics
+                                    .pairVolatility > 50,
+                            isLong: rec.direction === "long",
+                            fundingDirection: Math.sign(fundingRates.current),
+                            warnings: [],
+                        };
+
+                        // High volatility warnings based on position
+                        if (volatilityContext.isHighVol) {
+                            if (volatilityContext.isLong) {
+                                volatilityContext.warnings.push(
+                                    "High volatility - Consider tighter stops for long position"
+                                );
+                            } else {
+                                volatilityContext.warnings.push(
+                                    "High volatility - Consider lower size for short position"
+                                );
+                            }
+                        }
+
+                        // Funding rate warnings based on position
+                        if (Math.abs(fundingRates.current) > 0.01) {
+                            if (
+                                (volatilityContext.isLong &&
+                                    fundingRates.current > 0) ||
+                                (!volatilityContext.isLong &&
+                                    fundingRates.current < 0)
+                            ) {
+                                volatilityContext.warnings.push(
+                                    `You're paying ${Math.abs(fundingRates.current * 100).toFixed(2)}% funding rate`
+                                );
+                            } else {
+                                volatilityContext.warnings.push(
+                                    `You're earning ${Math.abs(fundingRates.current * 100).toFixed(2)}% funding rate`
+                                );
+                            }
+                        }
+
+                        // 8. Create memory entry with all the analyzed data
+                        const recMemory = {
+                            userId: message.userId,
+                            agentId,
+                            content: {
+                                text: JSON.stringify({
+                                    type: "perp_recommendation",
+                                    data: {
+                                        ...rec,
+                                        marketInfo: {
+                                            marketCode: rec.marketCode,
+                                            fundingRate: fundingRates.current,
+                                            openInterest:
+                                                marketInfo.openInterest,
+                                            volume24h: marketInfo.volume24h,
+                                        },
+                                        evaluation: pairEvaluation,
+                                        tokenMarketData,
+                                        maxLeverage:
+                                            await oxProvider.getMaxLeverage(
+                                                rec.marketCode,
+                                                rec.size.toString()
+                                            ),
+                                        recommendedSize: Math.min(
+                                            rec.size,
+                                            tokenMarketData.volume24h * 0.01 // Cap at 1% of daily volume
+                                        ),
+                                        volatilityContext,
+                                        warnings: volatilityContext.warnings,
+                                    },
+                                }),
+                                type: "perp_recommendation",
+                                source: "yield_evaluator",
+                            },
+                            roomId,
+                            createdAt: Date.now(),
+                        };
+
+                        await recommendationsManager.createMemory(
+                            recMemory,
+                            true
+                        );
+                        break;
+                    }
+                }
+            }
+
+            return filteredRecommendations;
         } catch (error) {
             console.error("Error in yield opportunity evaluator:", error);
             return "Failed to evaluate yield opportunity.";
         }
     },
+
+    examples: [],
 };
+
+// // Helper functions moved outside the evaluator
+// async function calculateMetrics(
+//     priceData: any,
+//     securityData: any,
+//     holderData: any,
+//     historicalPrices: any
+// ): Promise<YieldOpportunityMetrics> {
+//     const volatility = calculateVolatility(historicalPrices);
+//     const volumeToTVL = priceData.volume24h / priceData.tvl;
+
+//     return {
+//         price: priceData.price,
+//         priceChange24h: priceData.priceChange24h,
+//         volume24h: priceData.volume24h,
+//         tvl: priceData.tvl,
+//         volumeToTVLRatio: volumeToTVL,
+//         estimatedAPR: calculateEstimatedAPR(priceData, volumeToTVL),
+//         feeAPR: calculateFeeAPR(priceData),
+//         rewardAPR: calculateRewardAPR(priceData),
+//         impermanentLossRisk: calculateILRisk(volatility),
+//         securityScore: securityData.score,
+//         priceVolatility: volatility,
+//         volatilityOpportunity: Math.min(100, volatility * 2),
+//         liquidityConcentration: calculateLiquidityConcentration(priceData),
+//         holderDistribution: calculateHolderDistribution(holderData),
+//         hedgingCost: priceData.hedgingCost,
+//         fundingRate: priceData.fundingRate,
+//         basisSpread: priceData.basisSpread,
+//     };
+// }
+
+// function calculateVolatility(prices: number[]): number {
+//     if (prices.length < 2) return 0;
+//     const returns = prices
+//         .slice(1)
+//         .map((price, i) => Math.log(price / prices[i]));
+//     const mean = returns.reduce((a, b) => a + b) / returns.length;
+//     const variance =
+//         returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / returns.length;
+//     return Math.sqrt(variance);
+// }
+
+// function calculateEstimatedAPR(priceData: any, volumeToTVL: number): number {
+//     return volumeToTVL * 365 * 0.003 * 100; // Assuming 0.3% fee tier
+// }
+
+// function calculateFeeAPR(priceData: any): number {
+//     return ((priceData.volume24h * 0.003 * 365) / priceData.tvl) * 100;
+// }
+
+// function calculateRewardAPR(priceData: any): number {
+//     return priceData.rewardAPR || 0;
+// }
+
+// function calculateILRisk(volatility: number): number {
+//     return volatility * 200; // Raw IL calculation
+// }
+
+// function calculateLiquidityConcentration(priceData: any): number {
+//     return priceData.liquidityConcentration || 50;
+// }
+
+// function calculateHolderDistribution(holderData: any): number {
+//     return holderData.distribution || 50;
+// }
+
+// async function getPreviousRecommendations(
+//     runtime: IAgentRuntime,
+//     roomId: string
+// ): Promise<string> {
+//     const recommendations = await runtime.memoryManager.getMemories({
+//         roomId,
+//         count: 5,
+//         type: "yield_recommendation",
+//     });
+
+//     return recommendations.map((r) => JSON.stringify(r.content)).join("\n");
+// }
+
+// async function storeEvaluation(
+//     runtime: IAgentRuntime,
+//     message: Memory,
+//     evaluation: any
+// ) {
+//     await runtime.memoryManager.createMemory({
+//         userId: message.userId,
+//         agentId: runtime.agentId,
+//         content: evaluation,
+//         roomId: message.roomId,
+//         type: "yield_recommendation",
+//         createdAt: Date.now(),
+//     });
+// }

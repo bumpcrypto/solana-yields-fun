@@ -1,183 +1,126 @@
-# Stage One: Data Providers & Infrastructure Setup
+# Yields Fun Plugin Tasks
 
-## 1. Core Provider Setup
+## Core Infrastructure ✅
 
-### Yield Data Provider
+- [x] Base YieldProvider class structure
+- [x] Provider configuration and API setup
+- [x] Caching system implementation
 
-- [ ] Create base `YieldProvider` class structure
-- [ ] Implement caching system (using NodeCache)
-- [ ] Setup provider configuration with API endpoints
-- [ ] Create types for yield data structures
+## Protocol Integration
 
-### Protocol-Specific Providers
+### Completed ✅
 
-#### Meteora Provider
+- [x] Meteora LP pools and yield farming
+- [x] Raydium concentrated liquidity
+- [x] Marinade liquid staking
+- [x] Orca Whirlpools
 
-- [ ] Implement LP pool data fetching
-- [ ] Create types for Meteora pool structures
-- [ ] Add APY calculation functions
-- [ ] Implement position tracking
+### In Progress
 
-#### Raydium Provider
+## Testing Requirements
 
-- [ ] Setup Raydium SDK integration
-- [ ] Implement LP pool data fetching
-- [ ] Create concentrated liquidity position types
-- [ ] Add APY/fee calculation functions
-- [ ] Implement position tracking
-- [ ] Add risk assessment metrics
-- [ ] Setup volume tracking with Birdeye
+### Provider Tests
 
-#### Marinade Provider
+- [ ] Meteora Provider
 
-- [ ] Setup Marinade SDK integration
-- [ ] Implement liquid staking data fetching
-- [ ] Create staking position types
-- [ ] Add APY calculation functions
-- [ ] Implement validator selection metrics
-- [ ] Setup auto-compounding logic
+    - [ ] Pool discovery
+    - [ ] Yield calculation
+    - [ ] Position tracking
 
-#### Lido Provider
+- [ ] Raydium Provider
 
-- [ ] Setup Lido SDK integration
-- [ ] Implement liquid staking data fetching
-- [ ] Create staking position types
-- [ ] Add APY calculation functions
-- [ ] Setup auto-compounding logic
+    - [ ] Concentrated liquidity pools
+    - [ ] APY calculations
+    - [ ] Position management
 
-#### JPool Provider
+- [ ] Marinade Provider
 
-- [ ] Setup JPool SDK integration
-- [ ] Implement liquid staking data fetching
-- [ ] Create staking position types
-- [ ] Add APY calculation functions
-- [ ] Implement validator selection metrics
-- [ ] Setup auto-compounding logic
+    - [ ] Stake pool stats
+    - [ ] APY tracking
+    - [ ] Stake position handling
 
-#### Orca Provider
+- [ ] Orca Provider
 
-- [ ] Setup Orca SDK integration
-- [ ] Implement whirlpool data fetching
-- [ ] Create concentrated liquidity position types
-- [ ] Add APY/fee calculation functions
+    - [ ] Whirlpool discovery
+    - [ ] APR/APY calculations
+    - [ ] Position tracking
+    - [ ] Reward token handling
 
-#### LuLo Provider
+- [ ] Lulo Provider
 
-- [ ] Implement stable coin yield tracking
-- [ ] Create money market rate comparisons
-- [ ] Setup yield optimization calculations
+    - [ ] Pool discovery and validation
+    - [ ] Yield rate calculations
+    - [ ] Position and rewards tracking
 
-#### Jupiter Provider
+- [ ] DexScreener Provider
 
-- [ ] Setup Jupiter API integration
-- [ ] Implement swap route finding
-- [ ] Create price impact calculations
-- [ ] Setup slippage protection
+    - [ ] Price feed integration
+    - [ ] Data refresh mechanism
+    - [ ] Error handling and fallbacks
 
-## 2. Market Data Integration
+- [ ] Birdeye Integration
+    - [ ] Price feed accuracy
+    - [ ] Token metadata fetching
+    - [ ] Rate limiting handling
+    - [ ] Data caching
 
-### DexScreener Integration
+### Integration Tests
 
-- [ ] Setup API client
-- [ ] Implement memecoin trend analysis
-- [ ] Create volume/liquidity tracking
-- [ ] Setup price change monitoring
+- [ ] Meteora Integration
 
-### PumpDotFun Integration
+    - [ ] End-to-end pool interaction
+    - [ ] Yield tracking accuracy
+    - [ ] Error handling
 
-- [ ] Setup API client
-- [ ] Implement trend detection
-- [ ] Create social signal monitoring
-- [ ] Setup meme coin creation tracking
+- [ ] Raydium Integration
 
-## 3. Wallet & Transaction Infrastructure
+    - [ ] Pool interaction flows
+    - [ ] Position updates
+    - [ ] Edge cases
 
-### Wallet Provider
+- [ ] Marinade Integration
 
-- [ ] Setup basic wallet management
-- [ ] Implement balance tracking
-- [ ] Create transaction history monitoring
-- [ ] Setup multi-token support
+    - [ ] Staking workflows
+    - [ ] Reward calculations
+    - [ ] Error scenarios
 
-### Transaction Provider
+- [ ] Orca Integration
 
-- [ ] Setup Helius RPC integration
-- [ ] Implement priority fee calculation
-- [ ] Create transaction bundling with Jito
-- [ ] Setup retry mechanisms
+    - [ ] Whirlpool interactions
+    - [ ] Position management
+    - [ ] Reward claiming
+    - [ ] Price impact calculations
 
-## 4. Memory System
+- [ ] Lulo Integration
+    - [ ] Pool interactions
+    - [ ] Yield tracking
+    - [ ] Position management
 
-### Cache Management
+### System Tests
 
-- [ ] Setup file-based cache system
-- [ ] Implement in-memory caching
-- [ ] Create cache invalidation rules
-- [ ] Setup cache persistence
+- [ ] Wallet/Vault Program
 
-### State Management
+    - [ ] Account creation and management
+    - [ ] Transaction signing
+    - [ ] Permission handling
+    - [ ] Multi-wallet support
+    - [ ] Error recovery
 
-- [ ] Create yield farming state types
-- [ ] Implement position tracking
-- [ ] Setup performance metrics
-- [ ] Create state persistence
+- [ ] Price Feed System
+    - [ ] Provider fallback chain
+    - [ ] Data consistency checks
+    - [ ] Update frequency
+    - [ ] Cache invalidation
 
-## Required API Documentation & Integration Guides
-
-### Protocol Documentation
-
-- [ ] Jupiter API documentation
-- [ ] Meteora SDK documentation
-- [ ] Orca Whirlpools documentation
-- [ ] LuLo integration guide
-- [ ] Helius RPC documentation
-
-### Data API Documentation
-
-- [ ] DexScreener API endpoints
-- [ ] PumpDotFun API guide
-- [ ] Birdeye API documentation
-
-## Dependencies to Add
-
-```json
-{
-    "defi": {
-        "@orca-so/whirlpools-sdk": "latest",
-        "@meteora/meteora-sdk": "latest",
-        "@jup-ag/core": "latest",
-        "lulo-sdk": "latest"
-    },
-    "data": {
-        "dexscreener-api": "latest",
-        "pumpdotfun-sdk": "latest",
-        "@helius-labs/helius-sdk": "latest"
-    }
-}
-```
-
-## Environment Variables Needed
+## Testing Environment
 
 ```env
-# Protocol APIs
-METEORA_API_KEY=
-ORCA_RPC_URL=
-JUPITER_API_KEY=
-LULO_API_KEY=
+# Required Test Configuration
+TEST_RPC_URL=
+TEST_WALLET_PRIVATE_KEY=
+TEST_WALLET_PUBLIC_KEY=
 
-# Data APIs
-DEXSCREENER_API_KEY=
-PUMPDOTFUN_API_KEY=
-BIRDEYE_API_KEY=
-
-# Infrastructure
-HELIUS_RPC_URL=
-JITO_API_KEY=
+# API Keys
+TEST_METEORA_API_KEY=
+TEST_JUPITER_API_KEY=
 ```
-
-## Next Steps
-
-1. Start with implementing the base YieldProvider
-2. Focus on one protocol integration first (suggest Meteora or LuLo)
-3. Setup basic wallet infrastructure
-4. Implement caching system

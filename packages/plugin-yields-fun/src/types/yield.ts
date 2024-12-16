@@ -62,3 +62,56 @@ export interface RiskMetrics {
     protocolRisk: number;
     score: number;
 }
+
+// New types for the evaluator
+export interface YieldOpportunityMetrics {
+    // Price and Volume
+    price: number;
+    priceChange24h: number;
+    volume24h: number;
+    tvl: number;
+    volumeToTVLRatio: number;
+
+    // Yield Components
+    estimatedAPR: number;
+    feeAPR: number;
+    rewardAPR: number;
+
+    // Risk Metrics
+    impermanentLossRisk: number;
+    securityScore: number;
+    priceVolatility: number;
+    volatilityOpportunity: number;
+    liquidityConcentration: number;
+    holderDistribution: number;
+
+    // Delta Neutral Metrics
+    hedgingCost?: number;
+    fundingRate?: number;
+    basisSpread?: number;
+}
+
+export interface YieldRecommendation {
+    intent: YieldIntent;
+    strategy: "concentrated" | "full-range" | "observe" | "delta-neutral";
+    ammRouting?: string[];
+    maxExposure: number;
+    riskLevel: "low" | "medium" | "high" | "extreme";
+    reasoning: string[];
+    confidence: number;
+    hedgingCost?: number;
+    fundingRate?: number;
+    basisSpread?: number;
+    leverageRange?: {
+        min: number;
+        max: number;
+        recommended: number;
+    };
+    timeHorizon?: "short" | "medium" | "long";
+    entryTiming?: "immediate" | "wait_for_dip" | "dollar_cost_average";
+    stopLoss?: number;
+    takeProfit?: number;
+    rebalanceThreshold?: number;
+}
+
+export type YieldIntent = "farm" | "provide_liquidity" | "monitor";
